@@ -300,3 +300,155 @@ class IM_AE(object):
 		#output ply sum
 		write_ply_triangle(config.sample_dir+"/"+name+".ply", vertices, triangles)
 		print("[sample]")
+	
+	def z2voxel(self, z):
+		model_float = np.zeros([self.real_size+2,self.real_size+2,self.real_size+2],np.float32)
+		dimc = self.cell_grid_size
+		dimf = self.frame_grid_size
+		
+		frame_flag = np.zeros([dimf+2,dimf+2,dimf+2],np.uint8)
+		queue = []
+		
+		frame_batch_num = int(dimf**3/self.test_point_batch_size)
+		assert frame_batch_num>0
+		
+		#get frame grid values
+		for i in range(frame_batch_num):
+			point_coord = self.frame_coords[i*self.test_point_batch_size:(i+1)*self.test_point_batch_size]
+			point_coord = np.expand_dims(point_coord, axis=0)
+			point_coord = torch.from_numpy(point_coord)
+			point_coord = point_coord.to(self.device)
+			_, model_out_ = self.im_network(None, z, point_coord, is_training=False)
+			model_out = model_out_.detach().cpu().numpy()[0]
+			x_coords = self.frame_x[i*self.test_point_batch_size:(i+1)*self.test_point_batch_size]
+			y_coords = self.frame_y[i*self.test_point_batch_size:(i+1)*self.test_point_batch_size]
+			z_coords = self.frame_z[i*self.test_point_batch_size:(i+1)*self.test_point_batch_size]
+			frame_flag[x_coords+1,y_coords+1,z_coords+1] = np.reshape((model_out>self.sampling_threshold).astype(np.uint8), [self.test_point_batch_size])
+		
+		#get queue and fill up ones
+		for i in range(1,dimf+1):
+			for j in range(1,dimf+1):
+				for k in range(1,dimf+1):
+					maxv = np.max(frame_flag[i-1:i+2,j-1:j+2,k-1:k+2])
+					minv = np.min(frame_flag[i-1:i+2,j-1:j+2,k-1:k+2])
+					if maxv!=minv:
+						queue.append((i,j,k))
+					elif maxv==1:
+						x_coords = self.cell_x+(i-1)*dimc
+						y_coords = self.cell_y+(j-1)*dimc
+						z_coords = self.cell_z+(k-1)*dimc
+						model_float[x_coords+1,y_coords+1,z_coords+1] = 1.0
+		
+		print("running queue:",len(queue))
+		cell_batch_size = dimc**3
+		cell_batch_num = int(self.test_point_batch_size/cell_batch_size)
+		assert cell_batch_num>0
+		#run queue
+		while len(queue)>0:
+			batch_num = min(len(queue),cell_batch_num)
+			point_list = []
+			cell_coords = []
+			for i in range(batch_num):
+				point = queue.pop(0)
+				point_list.append(point)
+				cell_coords.append(self.cell_coords[point[0]-1,point[1]-1,point[2]-1])
+			cell_coords = np.concatenate(cell_coords, axis=0)
+			cell_coords = np.expand_dims(cell_coords, axis=0)
+			cell_coords = torch.from_numpy(cell_coords)
+			cell_coords = cell_coords.to(self.device)
+			_, model_out_batch_ = self.im_network(None, z, cell_coords, is_training=False)
+			model_out_batch = model_out_batch_.detach().cpu().numpy()[0]
+			for i in range(batch_num):
+				point = point_list[i]
+				model_out = model_out_batch[i*cell_batch_size:(i+1)*cell_batch_size,0]
+				x_coords = self.cell_x+(point[0]-1)*dimc
+				y_coords = self.cell_y+(point[1]-1)*dimc
+				z_coords = self.cell_z+(point[2]-1)*dimc
+				model_float[x_coords+1,y_coords+1,z_coords+1] = model_out
+				
+				if np.max(model_out)>self.sampling_threshold:
+					for i in range(-1,2):
+						pi = point[0]+i
+						if pi<=0 or pi>dimf: continue
+						for j in range(-1,2):
+							pj = point[1]+j
+							if pj<=0 or pj>dimf: continue
+							for k in range(-1,2):
+								pk = point[2]+k
+								if pk<=0 or pk>dimf: continue
+								if (frame_flag[pi,pj,pk] == 0):
+									frame_flag[pi,pj,pk] = 1
+									queue.append((pi,pj,pk))
+		return model_float
+	
+	#may introduce foldovers
+	def optimize_mesh(self, vertices, z, iteration = 3):
+		new_vertices = np.copy(vertices)
+
+		new_vertices_ = np.expand_dims(new_vertices, axis=0)
+		new_vertices_ = torch.from_numpy(new_vertices_)
+		new_vertices_ = new_vertices_.to(self.device)
+		_, new_v_out_ = self.im_network(None, z, new_vertices_, is_training=False)
+		new_v_out = new_v_out_.detach().cpu().numpy()[0]
+		
+		for iter in range(iteration):
+			for i in [-1,0,1]:
+				for j in [-1,0,1]:
+					for k in [-1,0,1]:
+						if i==0 and j==0 and k==0: continue
+						offset = np.array([[i,j,k]],np.float32)/(self.real_size*6*2**iter)
+						current_vertices = vertices+offset
+						current_vertices_ = np.expand_dims(current_vertices, axis=0)
+						current_vertices_ = torch.from_numpy(current_vertices_)
+						current_vertices_ = current_vertices_.to(self.device)
+						_, current_v_out_ = self.im_network(None, z, current_vertices_, is_training=False)
+						current_v_out = current_v_out_.detach().cpu().numpy()[0]
+						keep_flag = abs(current_v_out-self.sampling_threshold)<abs(new_v_out-self.sampling_threshold)
+						keep_flag = keep_flag.astype(np.float32)
+						new_vertices = current_vertices*keep_flag+new_vertices*(1-keep_flag)
+						new_v_out = current_v_out*keep_flag+new_v_out*(1-keep_flag)
+			vertices = new_vertices
+		
+		return vertices
+
+	def test_mesh_point(self, config):
+		#load previous checkpoint
+		checkpoint_txt = os.path.join(self.checkpoint_path, "checkpoint")
+		if os.path.exists(checkpoint_txt):
+			fin = open(checkpoint_txt)
+			model_dir = fin.readline().strip()
+			fin.close()
+			self.im_network.load_state_dict(torch.load(model_dir))
+			print(" [*] Load SUCCESS")
+		else:
+			print(" [!] Load failed...")
+			return
+		
+		self.im_network.eval()
+		for t in range(config.start, min(len(self.data_voxels),config.end)):
+			batch_voxels_ = self.data_voxels[t:t+1].astype(np.float32)
+			batch_voxels = torch.from_numpy(batch_voxels_)
+			batch_voxels = batch_voxels.to(self.device)
+			model_z,_ = self.im_network(batch_voxels, None, None, is_training=False)
+			model_float = self.z2voxel(model_z)
+
+			img1 = np.clip(np.amax(model_float, axis=0)*256, 0,255).astype(np.uint8)
+			img2 = np.clip(np.amax(model_float, axis=1)*256, 0,255).astype(np.uint8)
+			img3 = np.clip(np.amax(model_float, axis=2)*256, 0,255).astype(np.uint8)
+			cv2.imwrite(config.sample_dir+"/"+str(t)+"_1t.png",img1)
+			cv2.imwrite(config.sample_dir+"/"+str(t)+"_2t.png",img2)
+			cv2.imwrite(config.sample_dir+"/"+str(t)+"_3t.png",img3)
+
+			vertices, triangles = mcubes.marching_cubes(model_float, self.sampling_threshold)
+			vertices = (vertices.astype(np.float32)-0.5)/self.real_size-0.5
+			#vertices = self.optimize_mesh(vertices,model_z)
+			write_ply_triangle(config.sample_dir+"/"+str(t)+"_vox.ply", vertices, triangles)
+			
+			print("[sample]")
+			
+			#sample surface points
+			sampled_points_normals = sample_points_triangle(vertices, triangles, 4096)
+			np.random.shuffle(sampled_points_normals)
+			write_ply_point_normal(config.sample_dir+"/"+str(t)+"_pc.ply", sampled_points_normals)
+			
+			print("[sample]")
