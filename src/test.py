@@ -3,7 +3,7 @@ import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-from modelAE import IM_AE
+from IM-AE import IM_AE
 
 import argparse
 
