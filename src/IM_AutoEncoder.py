@@ -339,7 +339,6 @@ class IM_AE(object):
 						z_coords = self.cell_z+(k-1)*dimc
 						model_float[x_coords+1,y_coords+1,z_coords+1] = 1.0
 		
-		print("running queue:",len(queue))
 		cell_batch_size = dimc**3
 		cell_batch_num = int(self.test_point_batch_size/cell_batch_size)
 		assert cell_batch_num>0
@@ -445,13 +444,10 @@ class IM_AE(object):
 			write_ply_triangle(config.sample_dir+"/"+str(t)+"_vox.ply", vertices, triangles)
 			
 			print("[sample]")
-			
 			#sample surface points
 			sampled_points_normals = sample_points_triangle(vertices, triangles, 4096)
 			np.random.shuffle(sampled_points_normals)
 			write_ply_point_normal(config.sample_dir+"/"+str(t)+"_pc.ply", sampled_points_normals)
-			
-			print("[sample]")
 
 	def get_z(self, config):
 		#load previous checkpoint
@@ -484,15 +480,21 @@ class IM_AE(object):
 		print("[z]")
 		
 
-	def test_z(self, config, batch_z, dim):
-		could_load, checkpoint_counter = self.load(self.checkpoint_dir)
-		if could_load:
+	def test_z(self, config):
+		checkpoint_txt = os.path.join(self.checkpoint_path, "checkpoint")
+		if os.path.exists(checkpoint_txt):
+			fin = open(checkpoint_txt)
+			model_dir = fin.readline().strip()
+			fin.close()
+			self.im_network.load_state_dict(torch.load(model_dir))
 			print(" [*] Load SUCCESS")
 		else:
 			print(" [!] Load failed...")
 			return
-		
-		for t in range(batch_z.shape[0]):
+		dictionary = h5py.File('./checkpoint/all_vox256_img_ae_64/all_vox256_img_train_z.hdf5', 'r')
+		batch_z = dictionary['zs'][...]
+		dim = 128
+		for t in range(config.start, min(batch_z.shape[0],config.end)):
 			model_z = batch_z[t:t+1]
 			model_z = torch.from_numpy(model_z)
 			model_z = model_z.to(self.device)
@@ -500,15 +502,15 @@ class IM_AE(object):
 			img1 = np.clip(np.amax(model_float, axis=0)*256, 0,255).astype(np.uint8)
 			img2 = np.clip(np.amax(model_float, axis=1)*256, 0,255).astype(np.uint8)
 			img3 = np.clip(np.amax(model_float, axis=2)*256, 0,255).astype(np.uint8)
-			cv2.imwrite(config.sample_dir+"/"+str(t)+"_1t.png",img1)
-			cv2.imwrite(config.sample_dir+"/"+str(t)+"_2t.png",img2)
-			cv2.imwrite(config.sample_dir+"/"+str(t)+"_3t.png",img3)
+			cv2.imwrite(config.sample_dir+"/"+str(t)+"_1tz.png",img1)
+			cv2.imwrite(config.sample_dir+"/"+str(t)+"_2tz.png",img2)
+			cv2.imwrite(config.sample_dir+"/"+str(t)+"_3tz.png",img3)
 			
 			vertices, triangles = mcubes.marching_cubes(model_float, self.sampling_threshold)
 			vertices = (vertices.astype(np.float32)-0.5)/self.real_size-0.5
-			#vertices = self.optimize_mesh(vertices,model_z)
-			write_ply(config.sample_dir+"/"+"out"+str(t)+".ply", vertices, triangles)
+			vertices = self.optimize_mesh(vertices,model_z)
+			write_ply_triangle(config.sample_dir+"/"+"out"+str(t)+".ply", vertices, triangles)
 			
-			print("[sample Z]")
+			print("[sample GAN]")
 
 
