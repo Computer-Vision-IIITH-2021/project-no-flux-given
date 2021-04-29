@@ -452,3 +452,63 @@ class IM_AE(object):
 			write_ply_point_normal(config.sample_dir+"/"+str(t)+"_pc.ply", sampled_points_normals)
 			
 			print("[sample]")
+
+	def get_z(self, config):
+		#load previous checkpoint
+		checkpoint_txt = os.path.join(self.checkpoint_path, "checkpoint")
+		if os.path.exists(checkpoint_txt):
+			fin = open(checkpoint_txt)
+			model_dir = fin.readline().strip()
+			fin.close()
+			self.im_network.load_state_dict(torch.load(model_dir))
+			print(" [*] Load SUCCESS")
+		else:
+			print(" [!] Load failed...")
+			return
+
+		hdf5_path = self.checkpoint_dir+'/'+self.model_dir+'/'+self.dataset_name+'_train_z.hdf5'
+		shape_num = len(self.data_voxels)
+		hdf5_file = h5py.File(hdf5_path, mode='w')
+		hdf5_file.create_dataset("zs", [shape_num,self.z_dim], np.float32)
+
+		self.im_network.eval()
+		print(shape_num)
+		for t in range(shape_num):
+			batch_voxels = self.data_voxels[t:t+1].astype(np.float32)
+			batch_voxels = torch.from_numpy(batch_voxels)
+			batch_voxels = batch_voxels.to(self.device)
+			out_z,_ = self.im_network(batch_voxels, None, None, is_training=False)
+			hdf5_file["zs"][t:t+1,:] = out_z.detach().cpu().numpy()
+
+		hdf5_file.close()
+		print("[z]")
+		
+
+	def test_z(self, config, batch_z, dim):
+		could_load, checkpoint_counter = self.load(self.checkpoint_dir)
+		if could_load:
+			print(" [*] Load SUCCESS")
+		else:
+			print(" [!] Load failed...")
+			return
+		
+		for t in range(batch_z.shape[0]):
+			model_z = batch_z[t:t+1]
+			model_z = torch.from_numpy(model_z)
+			model_z = model_z.to(self.device)
+			model_float = self.z2voxel(model_z)
+			img1 = np.clip(np.amax(model_float, axis=0)*256, 0,255).astype(np.uint8)
+			img2 = np.clip(np.amax(model_float, axis=1)*256, 0,255).astype(np.uint8)
+			img3 = np.clip(np.amax(model_float, axis=2)*256, 0,255).astype(np.uint8)
+			cv2.imwrite(config.sample_dir+"/"+str(t)+"_1t.png",img1)
+			cv2.imwrite(config.sample_dir+"/"+str(t)+"_2t.png",img2)
+			cv2.imwrite(config.sample_dir+"/"+str(t)+"_3t.png",img3)
+			
+			vertices, triangles = mcubes.marching_cubes(model_float, self.sampling_threshold)
+			vertices = (vertices.astype(np.float32)-0.5)/self.real_size-0.5
+			#vertices = self.optimize_mesh(vertices,model_z)
+			write_ply(config.sample_dir+"/"+"out"+str(t)+".ply", vertices, triangles)
+			
+			print("[sample Z]")
+
+
